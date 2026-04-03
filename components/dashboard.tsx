@@ -13,14 +13,19 @@ import { Button } from "@/components/ui/button"
 import { GraduationCap, LayoutGrid, List, Plus } from "lucide-react"
 import { CourseImportResult } from "@/lib/import-courses"
 import { toast } from "@/hooks/use-toast"
+import { CloudSyncPanel } from "./cloud-sync-panel"
+import { clearCourses, deleteCourse, listCourses, replaceCourses, saveCourse } from "@/lib/supabase/courses"
+import { getSupabaseBrowserClient, isSupabaseConfigured } from "@/lib/supabase/client"
+import type { Session } from "@supabase/supabase-js"
 
 const STORAGE_KEY = "student-dashboard-courses"
 const CURRENT_SEMESTER_KEY = "student-dashboard-current-semester"
 const DEFAULT_CURRENT_SEMESTER = "2026S"
+const CLOUD_SYNC_ENABLED = isSupabaseConfigured()
 
 export function Dashboard() {
-  const [courseList, setCourseList] = useState<Course[]>(initialCourses)
-  const [hasLoadedCourses, setHasLoadedCourses] = useState(false)
+  const [courseList, setCourseList] = useState<Course[]>(CLOUD_SYNC_ENABLED ? [] : initialCourses)
+  const [hasLoadedCourses, setHasLoadedCourses] = useState(!CLOUD_SYNC_ENABLED)
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedSemester, setSelectedSemester] = useState("all")
   const [selectedStatus, setSelectedStatus] = useState("all")
@@ -28,8 +33,34 @@ export function Dashboard() {
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [editingCourse, setEditingCourse] = useState<Course | null>(null)
   const [currentSemester, setCurrentSemester] = useState(DEFAULT_CURRENT_SEMESTER)
+  const [session, setSession] = useState<Session | null>(null)
+  const [authReady, setAuthReady] = useState(!CLOUD_SYNC_ENABLED)
+  const [isSyncing, setIsSyncing] = useState(false)
+
+  const supabase = useMemo(() => {
+    if (!CLOUD_SYNC_ENABLED) {
+      return null
+    }
+
+    return getSupabaseBrowserClient()
+  }, [])
 
   useEffect(() => {
+    const storedCurrentSemester = window.localStorage.getItem(CURRENT_SEMESTER_KEY)
+    if (storedCurrentSemester) {
+      setCurrentSemester(storedCurrentSemester)
+    }
+  }, [])
+
+  useEffect(() => {
+    window.localStorage.setItem(CURRENT_SEMESTER_KEY, currentSemester)
+  }, [currentSemester])
+
+  useEffect(() => {
+    if (CLOUD_SYNC_ENABLED) {
+      return
+    }
+
     const storedCourses = window.localStorage.getItem(STORAGE_KEY)
 
     if (!storedCourses) {
@@ -45,23 +76,103 @@ export function Dashboard() {
     } catch {
       window.localStorage.removeItem(STORAGE_KEY)
     } finally {
-      const storedCurrentSemester = window.localStorage.getItem(CURRENT_SEMESTER_KEY)
-      if (storedCurrentSemester) {
-        setCurrentSemester(storedCurrentSemester)
-      }
-
       setHasLoadedCourses(true)
     }
   }, [])
 
   useEffect(() => {
-    if (!hasLoadedCourses) {
+    if (CLOUD_SYNC_ENABLED || !hasLoadedCourses) {
       return
     }
 
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(courseList))
-    window.localStorage.setItem(CURRENT_SEMESTER_KEY, currentSemester)
-  }, [courseList, currentSemester, hasLoadedCourses])
+  }, [courseList, hasLoadedCourses])
+
+  useEffect(() => {
+    if (!supabase) {
+      return
+    }
+
+    let isActive = true
+
+    const handleSession = async (nextSession: Session | null) => {
+      if (!isActive) {
+        return
+      }
+
+      setSession(nextSession)
+
+      if (!nextSession) {
+        setCourseList([])
+        setHasLoadedCourses(true)
+        setAuthReady(true)
+        return
+      }
+
+      setAuthReady(true)
+      setHasLoadedCourses(false)
+      setIsSyncing(true)
+
+      try {
+        let remoteCourses = await listCourses(supabase)
+
+        if (remoteCourses.length === 0) {
+          const localCourses = readLegacyLocalCourses()
+          if (localCourses.length > 0) {
+            await replaceCourses(supabase, nextSession.user.id, localCourses)
+            remoteCourses = localCourses
+            toast({
+              title: "Local data moved to cloud sync",
+              description: `${localCourses.length} courses were uploaded for this account.`,
+            })
+          }
+        }
+
+        if (!isActive) {
+          return
+        }
+
+        setCourseList(remoteCourses)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Could not load courses from Supabase."
+        toast({
+          title: "Cloud sync failed",
+          description: message,
+          variant: "destructive",
+        })
+      } finally {
+        if (isActive) {
+          setHasLoadedCourses(true)
+          setIsSyncing(false)
+        }
+      }
+    }
+
+    void supabase.auth.getSession()
+      .then(({ data }) => {
+        void handleSession(data.session)
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "Could not restore the Supabase session."
+        toast({
+          title: "Cloud sync failed",
+          description: message,
+          variant: "destructive",
+        })
+        setAuthReady(true)
+        setHasLoadedCourses(true)
+        setIsSyncing(false)
+      })
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      void handleSession(nextSession)
+    })
+
+    return () => {
+      isActive = false
+      authListener.subscription.unsubscribe()
+    }
+  }, [supabase])
 
   useEffect(() => {
     if (selectedSemester !== "all" && !courseList.some((course) => course.semester === selectedSemester)) {
@@ -107,57 +218,130 @@ export function Dashboard() {
   }
 
   const handleDeleteCourse = (courseId: string) => {
-    const courseToDelete = courseList.find((course) => course.id === courseId)
-    if (!courseToDelete) {
-      return
-    }
+    void (async () => {
+      const courseToDelete = courseList.find((course) => course.id === courseId)
+      if (!courseToDelete) {
+        return
+      }
 
-    const confirmed = window.confirm(`Delete "${courseToDelete.name}" from the dashboard?`)
-    if (!confirmed) {
-      return
-    }
+      const confirmed = window.confirm(`Delete "${courseToDelete.name}" from the dashboard?`)
+      if (!confirmed) {
+        return
+      }
 
-    setCourseList((current) => current.filter((course) => course.id !== courseId))
+      if (!supabase || !session) {
+        setCourseList((current) => current.filter((course) => course.id !== courseId))
+        return
+      }
+
+      setIsSyncing(true)
+
+      try {
+        await deleteCourse(supabase, courseId)
+        setCourseList((current) => current.filter((course) => course.id !== courseId))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "The course could not be deleted."
+        toast({
+          title: "Delete failed",
+          description: message,
+          variant: "destructive",
+        })
+      } finally {
+        setIsSyncing(false)
+      }
+    })()
   }
 
   const handleSaveCourse = (values: CourseFormValues, courseId?: string) => {
-    const nextCourse: Course = {
-      id: courseId ?? crypto.randomUUID(),
-      name: values.name,
-      credits: Number(values.credits),
-      semester: values.semester,
-      status: values.status,
-      grade: values.status === "done" && values.grade ? values.grade : null,
-      examDate: values.examDate || null,
-      examiner: values.examiner || null,
-    }
-
-    setCourseList((current) => {
-      if (!courseId) {
-        return [...current, nextCourse]
+    void (async () => {
+      const nextCourse: Course = {
+        id: courseId ?? crypto.randomUUID(),
+        name: values.name,
+        credits: Number(values.credits),
+        semester: values.semester,
+        status: values.status,
+        grade: values.status === "done" && values.grade ? values.grade : null,
+        examDate: values.examDate || null,
+        examiner: values.examiner || null,
       }
 
-      return current.map((course) => (course.id === courseId ? nextCourse : course))
-    })
+      if (!supabase || !session) {
+        setCourseList((current) => {
+          if (!courseId) {
+            return [...current, nextCourse]
+          }
 
-    setIsDialogOpen(false)
-    setEditingCourse(null)
+          return current.map((course) => (course.id === courseId ? nextCourse : course))
+        })
+
+        setIsDialogOpen(false)
+        setEditingCourse(null)
+        return
+      }
+
+      setIsSyncing(true)
+
+      try {
+        const savedCourse = await saveCourse(supabase, session.user.id, nextCourse)
+
+        setCourseList((current) => {
+          if (!courseId) {
+            return [...current, savedCourse]
+          }
+
+          return current.map((course) => (course.id === courseId ? savedCourse : course))
+        })
+
+        setIsDialogOpen(false)
+        setEditingCourse(null)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "The course could not be saved."
+        toast({
+          title: "Save failed",
+          description: message,
+          variant: "destructive",
+        })
+      } finally {
+        setIsSyncing(false)
+      }
+    })()
   }
 
   const handleImportComplete = ({ courses, skippedRows, fileName }: CourseImportResult) => {
-    setCourseList(courses)
-    setSelectedSemester("all")
-    setSelectedStatus("all")
-    setSearchQuery("")
+    void (async () => {
+      if (supabase && session) {
+        setIsSyncing(true)
 
-    const description = skippedRows > 0
-      ? `${courses.length} courses imported from ${fileName}. ${skippedRows} row${skippedRows === 1 ? "" : "s"} skipped.`
-      : `${courses.length} courses imported from ${fileName}.`
+        try {
+          await replaceCourses(supabase, session.user.id, courses)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "The imported courses could not be saved."
+          toast({
+            title: "Import failed",
+            description: message,
+            variant: "destructive",
+          })
+          setIsSyncing(false)
+          return
+        }
 
-    toast({
-      title: "Import complete",
-      description,
-    })
+        setIsSyncing(false)
+      }
+
+      setCourseList(courses)
+      setSelectedSemester("all")
+      setSelectedStatus("all")
+      setSearchQuery("")
+
+      const description = skippedRows > 0
+        ? `${courses.length} courses imported from ${fileName}. ${skippedRows} row${skippedRows === 1 ? "" : "s"} skipped.`
+        : `${courses.length} courses imported from ${fileName}.`
+
+      toast({
+        title: "Import complete",
+        description,
+      })
+    })()
   }
 
   const handleImportError = (message: string) => {
@@ -169,17 +353,125 @@ export function Dashboard() {
   }
 
   const handleClearAllCourses = () => {
-    setCourseList([])
-    setSelectedSemester("all")
-    setSelectedStatus("all")
-    setSearchQuery("")
-    setCurrentSemester("all")
+    void (async () => {
+      if (supabase && session) {
+        setIsSyncing(true)
+
+        try {
+          await clearCourses(supabase)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "The dashboard could not be cleared."
+          toast({
+            title: "Clear failed",
+            description: message,
+            variant: "destructive",
+          })
+          setIsSyncing(false)
+          return
+        }
+
+        setIsSyncing(false)
+      }
+
+      setCourseList([])
+      setSelectedSemester("all")
+      setSelectedStatus("all")
+      setSearchQuery("")
+      setCurrentSemester("all")
+
+      toast({
+        title: "Table cleared",
+        description: "All courses were removed from the dashboard.",
+      })
+    })()
+  }
+
+  const handleSignIn = async (email: string) => {
+    if (!supabase) {
+      throw new Error("Supabase is not configured.")
+    }
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: window.location.origin,
+      },
+    })
+
+    if (error) {
+      throw error
+    }
 
     toast({
-      title: "Table cleared",
-      description: "All courses were removed from the dashboard.",
+      title: "Check your inbox",
+      description: `A sign-in link was sent to ${email}.`,
     })
   }
+
+  const handleSignOut = async () => {
+    if (!supabase) {
+      return
+    }
+
+    setIsSyncing(true)
+
+    try {
+      const { error } = await supabase.auth.signOut()
+      if (error) {
+        throw error
+      }
+
+      toast({
+        title: "Signed out",
+        description: "Cloud sync has been disconnected for this browser.",
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not sign out."
+      toast({
+        title: "Sign-out failed",
+        description: message,
+        variant: "destructive",
+      })
+    } finally {
+      setIsSyncing(false)
+    }
+  }
+
+  const showCloudGate = CLOUD_SYNC_ENABLED && authReady && !session
+  const showLoadingState = CLOUD_SYNC_ENABLED && (!authReady || !hasLoadedCourses)
+
+  if (showLoadingState) {
+    return (
+      <div className="min-h-screen bg-background">
+        <main className="mx-auto flex min-h-screen max-w-3xl items-center px-4 py-16 sm:px-6 lg:px-8">
+          <div className="w-full rounded-xl border border-border bg-card p-8">
+            <p className="text-sm font-medium text-foreground">Connecting to cloud sync...</p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              The app is restoring your session and loading your course table.
+            </p>
+          </div>
+        </main>
+      </div>
+    )
+  }
+
+  if (showCloudGate) {
+    return (
+      <div className="min-h-screen bg-background">
+        <main className="mx-auto flex min-h-screen max-w-3xl items-center px-4 py-16 sm:px-6 lg:px-8">
+          <CloudSyncPanel
+            cloudSyncEnabled={CLOUD_SYNC_ENABLED}
+            isLoading={isSyncing}
+            userEmail={null}
+            onSignIn={handleSignIn}
+            onSignOut={handleSignOut}
+          />
+        </main>
+      </div>
+    )
+  }
+
+  const currentUserEmail = session?.user.email ?? null
 
   return (
     <div className="min-h-screen bg-background">
@@ -225,6 +517,14 @@ export function Dashboard() {
       {/* Main Content */}
       <main className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
         <div className="space-y-8">
+          <CloudSyncPanel
+            cloudSyncEnabled={CLOUD_SYNC_ENABLED}
+            isLoading={isSyncing}
+            userEmail={currentUserEmail}
+            onSignIn={handleSignIn}
+            onSignOut={handleSignOut}
+          />
+
           {/* Stats Cards */}
           <StatsCards stats={allStats} />
 
@@ -331,4 +631,18 @@ export function Dashboard() {
       />
     </div>
   )
+}
+
+function readLegacyLocalCourses() {
+  const storedCourses = window.localStorage.getItem(STORAGE_KEY)
+  if (!storedCourses) {
+    return []
+  }
+
+  try {
+    const parsedCourses = JSON.parse(storedCourses) as Course[]
+    return Array.isArray(parsedCourses) ? parsedCourses : []
+  } catch {
+    return []
+  }
 }
