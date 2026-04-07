@@ -10,9 +10,10 @@ import { SemesterOverview } from "./semester-overview"
 import { CourseFormDialog } from "./course-form-dialog"
 import { CourseActionsMenu } from "./course-actions-menu"
 import { Button } from "@/components/ui/button"
-import { GraduationCap, LayoutGrid, List, Plus } from "lucide-react"
+import { Github, GraduationCap, LayoutGrid, List, Plus } from "lucide-react"
 import { CourseImportResult } from "@/lib/import-courses"
 import { toast } from "@/hooks/use-toast"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { CloudSyncPanel } from "./cloud-sync-panel"
 import { clearCourses, deleteCourse, listCourses, replaceCourses, saveCourse } from "@/lib/supabase/courses"
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "@/lib/supabase/client"
@@ -36,6 +37,7 @@ export function Dashboard() {
   const [session, setSession] = useState<Session | null>(null)
   const [authReady, setAuthReady] = useState(!CLOUD_SYNC_ENABLED)
   const [isSyncing, setIsSyncing] = useState(false)
+  const isMobile = useIsMobile()
 
   const supabase = useMemo(() => {
     if (!CLOUD_SYNC_ENABLED) {
@@ -114,19 +116,7 @@ export function Dashboard() {
       setIsSyncing(true)
 
       try {
-        let remoteCourses = await listCourses(supabase)
-
-        if (remoteCourses.length === 0) {
-          const localCourses = readLegacyLocalCourses()
-          if (localCourses.length > 0) {
-            await replaceCourses(supabase, nextSession.user.id, localCourses)
-            remoteCourses = localCourses
-            toast({
-              title: "Local data moved to cloud sync",
-              description: `${localCourses.length} courses were uploaded for this account.`,
-            })
-          }
-        }
+        const remoteCourses = await listCourses(supabase)
 
         if (!isActive) {
           return
@@ -393,9 +383,6 @@ export function Dashboard() {
 
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: {
-        emailRedirectTo: window.location.origin,
-      },
     })
 
     if (error) {
@@ -404,7 +391,28 @@ export function Dashboard() {
 
     toast({
       title: "Check your inbox",
-      description: `A sign-in link was sent to ${email}.`,
+      description: `A sign-in code was sent to ${email}.`,
+    })
+  }
+
+  const handleVerifyCode = async (email: string, code: string) => {
+    if (!supabase) {
+      throw new Error("Supabase is not configured.")
+    }
+
+    const { error } = await supabase.auth.verifyOtp({
+      email,
+      token: code,
+      type: "email",
+    })
+
+    if (error) {
+      throw error
+    }
+
+    toast({
+      title: "Signed in",
+      description: `Cloud sync is now connected for ${email}.`,
     })
   }
 
@@ -439,6 +447,7 @@ export function Dashboard() {
 
   const showCloudGate = CLOUD_SYNC_ENABLED && authReady && !session
   const showLoadingState = CLOUD_SYNC_ENABLED && (!authReady || !hasLoadedCourses)
+  const effectiveViewMode = isMobile ? "cards" : viewMode
 
   if (showLoadingState) {
     return (
@@ -464,6 +473,7 @@ export function Dashboard() {
             isLoading={isSyncing}
             userEmail={null}
             onSignIn={handleSignIn}
+            onVerifyCode={handleVerifyCode}
             onSignOut={handleSignOut}
           />
         </main>
@@ -484,11 +494,11 @@ export function Dashboard() {
                 <GraduationCap className="h-5 w-5 text-background" />
               </div>
               <div>
-                <h1 className="text-lg font-semibold text-foreground">Student Dashboard</h1>
-                <p className="text-xs text-muted-foreground">TU Wien - Electrical Engineering</p>
+                <h1 className="text-lg font-semibold text-foreground">Uni Dashboard</h1>
+                <p className="text-xs text-muted-foreground">Simple Course Tracking</p>
               </div>
             </div>
-            <div className="flex items-center gap-1 rounded-lg border border-border p-1">
+            <div className="hidden items-center gap-1 rounded-lg border border-border p-1 md:flex">
               <button
                 onClick={() => setViewMode("table")}
                 className={`flex h-8 w-8 items-center justify-center rounded-md transition-colors ${
@@ -522,6 +532,7 @@ export function Dashboard() {
             isLoading={isSyncing}
             userEmail={currentUserEmail}
             onSignIn={handleSignIn}
+            onVerifyCode={handleVerifyCode}
             onSignOut={handleSignOut}
           />
 
@@ -559,7 +570,7 @@ export function Dashboard() {
               </div>
             </div>
 
-            {viewMode === "table" ? (
+            {effectiveViewMode === "table" ? (
               <CourseTable
                 courses={filteredCourses}
                 totalCoursesCount={courseList.length}
@@ -618,6 +629,32 @@ export function Dashboard() {
         </div>
       </main>
 
+      <footer className="border-t border-border/70 bg-background/80">
+        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-5 text-xs text-muted-foreground sm:px-6 sm:flex-row sm:items-center sm:justify-between lg:px-8">
+          <p className="font-medium text-foreground/85">
+            {new Date().getFullYear()} Uni Dashboard - Built with <a 
+              href="https://nextjs.org"
+              target="_blank"
+              rel="noreferrer"
+              className="underline underline-offset-4 hover:text-foreground transition-colors"
+            >
+              Next.js
+            </a>
+          </p>
+          <div className="flex items-center gap-4">
+            <a
+              href="https://github.com/bendemaj/student-dashboard"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 transition-colors hover:text-foreground"
+            >
+              <Github className="h-3.5 w-3.5" />
+              <span>Repository</span>
+            </a>
+          </div>
+        </div>
+      </footer>
+
       <CourseFormDialog
         course={editingCourse}
         open={isDialogOpen}
@@ -631,18 +668,4 @@ export function Dashboard() {
       />
     </div>
   )
-}
-
-function readLegacyLocalCourses() {
-  const storedCourses = window.localStorage.getItem(STORAGE_KEY)
-  if (!storedCourses) {
-    return []
-  }
-
-  try {
-    const parsedCourses = JSON.parse(storedCourses) as Course[]
-    return Array.isArray(parsedCourses) ? parsedCourses : []
-  } catch {
-    return []
-  }
 }

@@ -4,8 +4,8 @@ import { Toaster } from '@/components/ui/toaster'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Student Dashboard | TU Wien',
-  description: 'Track your academic progress, courses, grades, and credits',
+  title: 'Dashboard',
+  description: 'Track your courses, grades, credits, and semester progress',
   generator: 'v0.app',
   icons: {
     icon: [

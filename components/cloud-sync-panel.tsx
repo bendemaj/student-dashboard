@@ -3,12 +3,16 @@
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp"
+
+const EMAIL_OTP_LENGTH = 8
 
 interface CloudSyncPanelProps {
   cloudSyncEnabled: boolean
   isLoading: boolean
   userEmail: string | null
   onSignIn: (email: string) => Promise<void>
+  onVerifyCode: (email: string, code: string) => Promise<void>
   onSignOut: () => Promise<void>
 }
 
@@ -17,18 +21,49 @@ export function CloudSyncPanel({
   isLoading,
   userEmail,
   onSignIn,
+  onVerifyCode,
   onSignOut,
 }: CloudSyncPanelProps) {
   const [email, setEmail] = useState("")
+  const [pendingEmail, setPendingEmail] = useState("")
+  const [otpCode, setOtpCode] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const requestCode = async (nextEmail: string) => {
+    setIsSubmitting(true)
+    setError(null)
+
+    try {
+      await onSignIn(nextEmail)
+      setPendingEmail(nextEmail)
+      setOtpCode("")
+      setEmail("")
+    } catch (submitError) {
+      const message = submitError instanceof Error ? submitError.message : "Could not start sign-in."
+      setError(message)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
     const trimmedEmail = email.trim()
     if (!trimmedEmail) {
-      setError("Enter your email address to receive a magic sign-in link.")
+      setError("Enter your email address to receive a sign-in code.")
+      return
+    }
+
+    await requestCode(trimmedEmail)
+  }
+
+  const handleVerify = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (otpCode.length !== EMAIL_OTP_LENGTH) {
+      setError(`Enter the ${EMAIL_OTP_LENGTH}-digit code from your email.`)
       return
     }
 
@@ -36,10 +71,11 @@ export function CloudSyncPanel({
     setError(null)
 
     try {
-      await onSignIn(trimmedEmail)
-      setEmail("")
+      await onVerifyCode(pendingEmail, otpCode)
+      setPendingEmail("")
+      setOtpCode("")
     } catch (submitError) {
-      const message = submitError instanceof Error ? submitError.message : "Could not start sign-in."
+      const message = submitError instanceof Error ? submitError.message : "Could not verify the sign-in code."
       setError(message)
     } finally {
       setIsSubmitting(false)
@@ -77,18 +113,69 @@ export function CloudSyncPanel({
       <p className="mt-1 text-sm text-muted-foreground">
         Use the same email on your laptop and phone to share one course database.
       </p>
-      <form className="mt-4 flex flex-col gap-3 sm:flex-row" onSubmit={handleSubmit}>
-        <Input
-          type="email"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          placeholder="you@example.com"
-          disabled={isLoading || isSubmitting}
-        />
-        <Button type="submit" disabled={isLoading || isSubmitting}>
-          {isSubmitting ? "Sending link..." : "Email me a sign-in link"}
-        </Button>
-      </form>
+      {pendingEmail ? (
+        <form className="mt-4 flex flex-col gap-4" onSubmit={handleVerify}>
+          <div className="space-y-1">
+            <p className="text-sm text-foreground">Enter the {EMAIL_OTP_LENGTH}-digit code sent to {pendingEmail}.</p>
+            <button
+              type="button"
+              className="text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+              onClick={() => {
+                setPendingEmail("")
+                setOtpCode("")
+                setError(null)
+                setEmail(pendingEmail)
+              }}
+            >
+              Use a different email
+            </button>
+          </div>
+          <InputOTP
+            maxLength={EMAIL_OTP_LENGTH}
+            value={otpCode}
+            onChange={setOtpCode}
+            disabled={isLoading || isSubmitting}
+            containerClassName="justify-start"
+          >
+            <InputOTPGroup>
+              <InputOTPSlot index={0} />
+              <InputOTPSlot index={1} />
+              <InputOTPSlot index={2} />
+              <InputOTPSlot index={3} />
+              <InputOTPSlot index={4} />
+              <InputOTPSlot index={5} />
+              <InputOTPSlot index={6} />
+              <InputOTPSlot index={7} />
+            </InputOTPGroup>
+          </InputOTP>
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <Button type="submit" disabled={isLoading || isSubmitting || otpCode.length !== EMAIL_OTP_LENGTH}>
+              {isSubmitting ? "Verifying..." : "Verify code"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isLoading || isSubmitting}
+              onClick={() => void requestCode(pendingEmail)}
+            >
+              Resend code
+            </Button>
+          </div>
+        </form>
+      ) : (
+        <form className="mt-4 flex flex-col gap-3 sm:flex-row" onSubmit={handleSubmit}>
+          <Input
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="you@example.com"
+            disabled={isLoading || isSubmitting}
+          />
+          <Button type="submit" disabled={isLoading || isSubmitting}>
+            {isSubmitting ? "Sending code..." : "Email me a sign-in code"}
+          </Button>
+        </form>
+      )}
       {error ? <p className="mt-3 text-sm text-destructive">{error}</p> : null}
     </div>
   )
